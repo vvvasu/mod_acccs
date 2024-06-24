@@ -1,6 +1,6 @@
 """
     Copyright 2023, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
-    
+
     This class is used to emulate a EVSE when talking to an PEV. Handles level 2 SLAC communications
     and level 3 UDP and TCP communications to the electric vehicle.
 """
@@ -22,18 +22,26 @@ from EmulatorEnum import *
 from NMAPScanner import NMAPScanner
 import xml.etree.ElementTree as ET
 import binascii
-from smbus import SMBus
+from scapy.layers.l2 import Ether # adjustment MicroNova
+from scapy.layers.inet6 import IPv6, UDP, TCP, ICMPv6ND_NS, ICMPv6ND_NA, ICMPv6NDOptDstLLAddr # adjustment MicroNova
+#from smbus import SMBus # adjustment MicroNova, to disable HardWare J1772 Pilot Signal
 import argparse
 
+import socket
+from scapy.all import StreamSocket
 
 class EVSE:
 
     def __init__(self, args):
         self.mode = RunMode(args.mode[0]) if args.mode else RunMode.FULL
         self.iface = args.interface[0] if args.interface else "eth1"
-        self.sourceMAC = args.source_mac[0] if args.source_mac else "00:1e:c0:f2:6c:a0"
-        self.sourceIP = args.source_ip[0] if args.source_ip else "fe80::21e:c0ff:fef2:6ca0"
-        self.sourcePort = args.source_port[0] if args.source_port else 25565
+        self.sourceMAC = args.source_mac[0] if args.source_mac else get_if_hwaddr(self.iface) #"00:1e:c0:f2:6c:a0" # adjustment MicroNova
+        #ip6_addr = [addr for addr, _, iface in in6_getifaddr() if iface == self.iface and not addr.startswith("fe80")][0] # ip address # adjustment MicroNova
+        self.ip6_addr_ll = [addr for addr, _, iface in in6_getifaddr() if iface == self.iface and addr.startswith("fe80")][0] # ip local link address # adjustment MicroNova
+        self.sourceIP = args.source_ip[0] if args.source_ip else self.ip6_addr_ll #"fe80::21e:c0ff:fef2:6ca0" # adjustment MicroNova
+        # adjustment MicroNova
+        # A port number in the range of Dynamic Ports (49152-65535) as defined in IETF RFC 6335 are allowed for TCP.
+        self.sourcePort = args.source_port[0] if args.source_port else 49153 # 25565 # adjustment MicroNova
         self.NID = args.NID[0] if args.NID else b"\x9c\xb0\xb2\xbb\xf5\x6c\x0e"
         self.NMK = args.NMK[0] if args.NMK else b"\x48\xfe\x56\x02\xdb\xac\xcd\xe5\x1e\xda\xdc\x3e\x08\x1a\x52\xd1"
         self.protocol = Protocol(args.protocol[0]) if args.protocol else Protocol.DIN
@@ -62,7 +70,7 @@ class EVSE:
         self.tcp = _TCPHandler(self)
 
         # I2C bus for relays
-        self.bus = SMBus(1)
+        # self.bus = SMBus(1) # adjustment MicroNova
 
         # Constants for i2c controlled relays
         self.I2C_ADDR = 0x20
@@ -74,10 +82,14 @@ class EVSE:
     # Start the emulator
     def start(self):
         # Initialize the I2C bus for wwrite
-        self.bus.write_byte_data(self.I2C_ADDR, 0x00, 0x00)
+        # self.bus.write_byte_data(self.I2C_ADDR, 0x00, 0x00)
 
         self.toggleProximity()
         self.doSLAC()
+        self.tcp.sourcePort = self.sourcePort # adjustment MicroNova
+        self.tcp.destinationIP = self.slac.destinationIP # adjustment MicroNova
+        self.tcp.destinationPort = self.destinationPort # adjustment MicroNova
+        self.tcp.destinationMAC = self.slac.destinationMAC # adjustment MicroNova
         self.doTCP()
         # If NMAP is not done, restart connection
         if not self.tcp.finishedNMAP:
@@ -88,15 +100,15 @@ class EVSE:
     def closeProximity(self):
         if self.modified_cordset:
             print("INFO (EVSE): Closing CP/PP relay connections")
-            self.bus.write_byte_data(self.I2C_ADDR, self.CONTROL_REG, self.EVSE_PP | self.EVSE_CP)
+            # self.bus.write_byte_data(self.I2C_ADDR, self.CONTROL_REG, self.EVSE_PP | self.EVSE_CP)
         else:
             print("INFO (EVSE): Closing CP relay connection")
-            self.bus.write_byte_data(self.I2C_ADDR, self.CONTROL_REG, self.EVSE_CP)
+            # self.bus.write_byte_data(self.I2C_ADDR, self.CONTROL_REG, self.EVSE_CP)
 
     # Close the circuit for the proximity pins
     def openProximity(self):
         print("INFO (EVSE): Opening CP/PP relay connections")
-        self.bus.write_byte_data(self.I2C_ADDR, self.CONTROL_REG, self.ALL_OFF)
+        # self.bus.write_byte_data(self.I2C_ADDR, self.CONTROL_REG, self.ALL_OFF)
 
     # Opens and closes proximity circuit with a delay
     def toggleProximity(self, t: int = 5):
@@ -156,14 +168,35 @@ class _SLACHandler:
 
     def stopSniff(self, pkt):
         if pkt.haslayer("SECC_RequestMessage"):
+            self.handshake() # adjustment MicroNova
+
             print("INDO (EVSE): Recieved SECC_RequestMessage")
-            # self.evse.destinationMAC = pkt[Ether].src
+            self.evse.destinationMAC = pkt[Ether].src # adjustment MicroNova
+            self.destinationMAC = pkt[Ether].src # adjustment MicroNova
             # use this to send 3 secc responses incase car doesnt see one
             self.destinationIP = pkt[IPv6].src
             self.destinationPort = pkt[UDP].sport
             Thread(target=self.sendSECCResponse).start()
             self.stop = True
         return self.stop
+
+    # adjustment MicroNova
+    def handshake(self, syn = None):
+        print("INFO (PEV): TCP Handshake start")
+        full_host_address = self.sourceIP + f"%{self.iface}"
+        resolve = socket.getaddrinfo(full_host_address, self.sourcePort, socket.AF_INET6, socket.SOCK_STREAM, 0, 0)
+        sockaddr = ()
+        (family, socktype, proto, _, sockaddr) = resolve[0]
+        print(f"INFO (PEV): TCP Socket is {sockaddr}")
+
+        self.conn = socket.socket(family, socktype)
+        try:
+            self.conn.bind(sockaddr)
+            self.conn.listen(1)
+        except socket.error as e:
+            print("INFO (PEV): TCP Handshake failed")
+            raise e
+        print("INFO (PEV): TCP Handshake successed")
 
     def sendSECCResponse(self):
         time.sleep(0.2)
@@ -394,6 +427,8 @@ class _TCPHandler:
         self.xml = XMLBuilder(self.exi)
         self.msgList = {}
 
+        self.finishedNMAP = False
+
         self.stop = False
         self.scanner = None
 
@@ -404,6 +439,16 @@ class _TCPHandler:
         self.running = True
         print("INFO (EVSE): Starting TCP")
         self.startSniff = False
+        self.got_client_info = False
+
+        # adjustment MicroNova
+        self.handshakeThread = AsyncSniffer(
+            count=1, iface=self.iface, lfilter=lambda x: x.haslayer("IPv6") and x.haslayer("TCP") and x[TCP].flags == "S", prn=self.handshake
+        )
+        self.handshakeThread.start()
+
+        while not self.got_client_info:
+            continue
 
         self.recvThread = AsyncSniffer(
             iface=self.iface,
@@ -416,10 +461,11 @@ class _TCPHandler:
         while not self.startSniff:
             continue
 
-        self.handshakeThread = AsyncSniffer(
-            count=1, iface=self.iface, lfilter=lambda x: x.haslayer("IPv6") and x.haslayer("TCP") and x[TCP].flags == "S", prn=self.handshake
-        )
-        self.handshakeThread.start()
+        # adjustment MicroNova
+        # self.handshakeThread = AsyncSniffer(
+        #     count=1, iface=self.iface, lfilter=lambda x: x.haslayer("IPv6") and x.haslayer("TCP") and x[TCP].flags == "S", prn=self.handshake
+        # )
+        # self.handshakeThread.start()
 
         self.neighborSolicitationThread = AsyncSniffer(
             iface=self.iface, lfilter=lambda x: x.haslayer("ICMPv6ND_NS") and x[ICMPv6ND_NS].tgt == self.sourceIP, prn=self.sendNeighborSoliciation
@@ -492,6 +538,11 @@ class _TCPHandler:
     def killThreads(self):
         print("INFO (EVSE): Killing sniffing threads")
         self.running = False
+        # adjustment MicroNova
+        try:
+            self.conn.close()
+        except:
+            pass
         if self.scanner:
             self.scanner.stop()
         if self.recvThread.running:
@@ -507,7 +558,7 @@ class _TCPHandler:
         self.ack = self.last_recv[TCP].seq + len(self.last_recv[TCP].payload)
 
         if "F" in self.last_recv.flags:
-            self.fin()
+            #self.fin() # adjustment MicroNova
             return
         if "P" not in self.last_recv.flags:
             return
@@ -603,6 +654,8 @@ class _TCPHandler:
             elif "SessionStopReq" in name:
                 self.running = False
                 self.xml.SessionStopResponse()
+            # elif "WeldingDetectionReq" in name:
+            #     self.xml.WeldingDetectionResponse()
             else:
                 raise Exception(f'Packet type "{name}" not recognized')
             return self.xml.getEXI()
@@ -615,7 +668,7 @@ class _TCPHandler:
         # if not (pkt.haslayer("ICMPv6ND_NS") and pkt[ICMPv6ND_NS].tgt == self.sourceIP): return
         self.destinationMAC = pkt[Ether].src
         self.destinationIP = pkt[IPv6].src
-        # print("INFO (EVSE): Sending Neighor Advertisement")
+        print("INFO (EVSE): Sending Neighor Advertisement")
         sendp(self.buildNeighborAdvertisement(), iface=self.iface, verbose=0)
 
     def handshake(self, syn):
@@ -623,25 +676,26 @@ class _TCPHandler:
         self.destinationIP = syn[IPv6].src
         self.destinationPort = syn[TCP].sport
         self.ack = syn[TCP].seq + 1
+        self.got_client_info = True
 
-        ethLayer = Ether()
-        ethLayer.src = self.sourceMAC
-        ethLayer.dst = self.destinationMAC
+        # ethLayer = Ether()
+        # ethLayer.src = self.sourceMAC
+        # ethLayer.dst = self.destinationMAC
 
-        ipLayer = IPv6()
-        ipLayer.src = self.sourceIP
-        ipLayer.dst = self.destinationIP
+        # ipLayer = IPv6()
+        # ipLayer.src = self.sourceIP
+        # ipLayer.dst = self.destinationIP
 
-        tcpLayer = TCP()
-        tcpLayer.sport = self.sourcePort
-        tcpLayer.dport = self.destinationPort
-        tcpLayer.flags = "SA"
-        tcpLayer.seq = self.seq
-        tcpLayer.ack = self.ack
+        # tcpLayer = TCP()
+        # tcpLayer.sport = self.sourcePort
+        # tcpLayer.dport = self.destinationPort
+        # tcpLayer.flags = "SA"
+        # tcpLayer.seq = self.seq
+        # tcpLayer.ack = self.ack
 
-        synAck = ethLayer / ipLayer / tcpLayer
-        print("INFO (EVSE): Sending SYNACK")
-        sendp(synAck, iface=self.iface, verbose=0)
+        # synAck = ethLayer / ipLayer / tcpLayer
+        # print("INFO (EVSE): Sending SYNACK")
+        # sendp(synAck, iface=self.iface, verbose=0)
 
     def buildNeighborAdvertisement(self):
         ethLayer = Ether()

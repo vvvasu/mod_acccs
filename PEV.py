@@ -24,8 +24,14 @@ import xml.etree.ElementTree as ET
 import binascii
 import os.path
 import random
-from smbus import SMBus
+from scapy.all import Raw # adjustment MicroNova
+from scapy.layers.l2 import Ether # adjustment MicroNova
+from scapy.layers.inet6 import IPv6, UDP, TCP, ICMPv6ND_NS, ICMPv6ND_NA, ICMPv6NDOptDstLLAddr # adjustment MicroNova
+#from smbus import SMBus # adjustment MicroNova, to disable HardWare J1772 Pilot Signal
 import argparse
+
+import socket
+from scapy.all import StreamSocket
 
 
 class PEV:
@@ -33,8 +39,10 @@ class PEV:
     def __init__(self, args):
         self.mode = RunMode(args.mode[0]) if args.mode else RunMode.FULL
         self.iface = args.interface[0] if args.interface else "eth1"
-        self.sourceMAC = args.source_mac[0] if args.source_mac else "00:1e:c0:f2:6c:a1"
-        self.sourceIP = args.source_ip[0] if args.source_ip else "fe80::21e:c0ff:fef2:6ca1"
+        self.sourceMAC = args.source_mac[0] if args.source_mac else get_if_hwaddr(self.iface) #"00:1e:c0:f2:6c:a1" # adjustment MicroNova
+        #ip6_addr = [addr for addr, _, iface in in6_getifaddr() if iface == self.iface and not addr.startswith("fe80")][0] # ip address # adjustment MicroNova
+        self.ip6_addr_ll = [addr for addr, _, iface in in6_getifaddr() if iface == self.iface and addr.startswith("fe80")][0] # ip local link address # adjustment MicroNova
+        self.sourceIP = args.source_ip[0] if args.source_ip else self.ip6_addr_ll #"fe80::21e:c0ff:fef2:6ca1" # adjustment MicroNova
         self.sourcePort = args.source_port[0] if args.source_port else random.randint(1025, 65534)
         self.protocol = Protocol(args.protocol[0]) if args.protocol else Protocol.DIN
         self.nmapMAC = args.nmap_mac[0] if args.nmap_mac else ""
@@ -59,7 +67,7 @@ class PEV:
         self.tcp = _TCPHandler(self)
 
         # I2C bus for relays
-        self.bus = SMBus(1)
+        # self.bus = SMBus(1) # adjustment MicroNova
 
         # Constants for i2c controlled relays
         self.I2C_ADDR = 0x20
@@ -71,10 +79,13 @@ class PEV:
 
     def start(self):
         # Initialize the smbus for I2C commands
-        self.bus.write_byte_data(self.I2C_ADDR, 0x00, 0x00)
+        # self.bus.write_byte_data(self.I2C_ADDR, 0x00, 0x00) # adjustment MicroNova
 
         self.toggleProximity()
         self.doSLAC()
+        self.tcp.destinationIP = self.destinationIP # adjustment MicroNova
+        self.tcp.destinationPort = self.destinationPort # adjustment MicroNova
+        self.tcp.destinationMAC = self.slac.destinationMAC # adjustment MicroNova
         self.doTCP()
         # If NMAP is not done, restart connection
         if not self.tcp.finishedNMAP:
@@ -100,13 +111,13 @@ class PEV:
     def setState(self, state: PEVState):
         if state == PEVState.A:
             print("INFO (PEV) : Going to state A")
-            self.bus.write_byte_data(self.I2C_ADDR, self.CONTROL_REG, self.ALL_OFF)
+            # self.bus.write_byte_data(self.I2C_ADDR, self.CONTROL_REG, self.ALL_OFF) # adjustment MicroNova
         elif state == PEVState.B:
             print("INFO (PEV) : Going to state B")
-            self.bus.write_byte_data(self.I2C_ADDR, self.CONTROL_REG, self.PEV_PP | self.PEV_CP1)
+            # self.bus.write_byte_data(self.I2C_ADDR, self.CONTROL_REG, self.PEV_PP | self.PEV_CP1) # adjustment MicroNova
         elif state == PEVState.C:
             print("INFO (PEV) : Going to state C")
-            self.bus.write_byte_data(self.I2C_ADDR, self.CONTROL_REG, self.PEV_PP | self.PEV_CP1 | self.PEV_CP2)
+            # self.bus.write_byte_data(self.I2C_ADDR, self.CONTROL_REG, self.PEV_PP | self.PEV_CP1 | self.PEV_CP2) # adjustment MicroNova
 
     def toggleProximity(self, t: int = 5):
         self.openProximity()
@@ -125,6 +136,7 @@ class _SLACHandler:
 
         self.timeSinceLastPkt = time.time()
         self.timeout = 8  # How long to wait for a message to timeout
+        self.timeout_count = 0 # adjustment MicroNova, to make it works without SLAC
         self.stop = False
 
     # This method starts the slac process and will stop
@@ -151,9 +163,14 @@ class _SLACHandler:
     def checkForTimeout(self):
         while self.stop == False:
             if time.time() - self.timeSinceLastPkt > self.timeout:
-                print("INFO (PEV) : Timed out... Sending SLAC_PARM_REQ")
-                sendp(self.buildSlacParmReq(), iface=self.iface, verbose=0)
-                self.timeSinceLastPkt = time.time()
+                if self.timeout_count < 2: # adjustment MicroNova
+                    print("INFO (PEV) : Timed out... Sending SLAC_PARM_REQ")
+                    sendp(self.buildSlacParmReq(), iface=self.iface, verbose=0)
+                    self.timeSinceLastPkt = time.time()
+                    self.timeout_count += 1
+                else: # adjustment MicroNova
+                    self.stop = True
+                    Thread(target=self.sendSECCRequest).start()
 
     def startSniff(self):
         sniff(iface=self.iface, prn=self.handlePacket, stop_filter=self.stopSniff)
@@ -397,7 +414,7 @@ class _SLACHandler:
     def sendNeighborSoliciation(self, pkt):
         # if self.stop: exit()
         # if not (pkt.haslayer("ICMPv6ND_NS") and pkt[ICMPv6ND_NS].tgt == self.sourceIP): return
-        # self.destinationMAC = pkt[Ether].src
+        self.destinationMAC = pkt[Ether].src
         self.destinationIP = pkt[IPv6].src
         # print("INFO (EVSE): Sending Neighor Advertisement")
         sendp(self.buildNeighborAdvertisement(), iface=self.iface, verbose=0)
@@ -428,12 +445,25 @@ class _TCPHandler:
         self.startSniff = False
         self.finishedNMAP = False
         self.lastPort = 0
-        
+
         self.scanner = None
 
         self.timeout = 5
 
         self.soc = 10
+
+        self.conn = None # adjustment MicroNova
+        self.ssck = None # adjustment MicroNova
+        self.session_started = False # adjustment MicroNova
+
+    # adjustment MicroNova
+    def _sendp(self, data,
+          iface=None,
+          iface_hint=None,
+          socket=None,
+          **kargs
+          ):
+        self.ssck.send(data)
 
     def start(self):
         self.msgList = {}
@@ -457,10 +487,11 @@ class _TCPHandler:
         self.timeoutThread = Thread(target=self.checkForTimeout)
         self.timeoutThread.start()
 
-        self.neighborSolicitationThread = AsyncSniffer(
-            iface=self.iface, lfilter=lambda x: x.haslayer("ICMPv6ND_NS") and x[ICMPv6ND_NS].tgt == self.sourceIP, prn=self.sendNeighborAdvertisement
-        )
-        self.neighborSolicitationThread.start()
+        # adjustment MicroNova
+        # self.neighborSolicitationThread = AsyncSniffer(
+        #     iface=self.iface, lfilter=lambda x: x.haslayer("ICMPv6ND_NS") and x[ICMPv6ND_NS].tgt == self.sourceIP, prn=self.sendNeighborAdvertisement
+        # )
+        # self.neighborSolicitationThread.start()
 
         while self.running:
             time.sleep(1)
@@ -473,6 +504,10 @@ class _TCPHandler:
             if time.time() - self.lastMessageTime > self.timeout or self.running == False:
                 print("INFO (PEV) : TCP timed out, resetting connection...")
                 # self.reset()
+                try:
+                    self.conn.close() # adjustment MicroNova
+                except:
+                    pass
                 self.killThreads()
                 break
             time.sleep(1)
@@ -484,8 +519,8 @@ class _TCPHandler:
         self.running = False
         if self.recvThread.running:
             self.recvThread.stop()
-        if self.neighborSolicitationThread.running:
-            self.neighborSolicitationThread.stop()
+        # if self.neighborSolicitationThread.running: # adjustment MicroNova
+        #     self.neighborSolicitationThread.stop() # adjustment MicroNova
 
     def recv(self):
         print("INFO (PEV) : Starting recv thread")
@@ -536,27 +571,30 @@ class _TCPHandler:
         self.startSniff = True
 
     def startSession(self):
-        sendp(
-            Ether(src=self.sourceMAC, dst=self.destinationMAC)
-            / IPv6(src=self.sourceIP, dst=self.destinationIP)
-            / TCP(sport=self.sourcePort, dport=self.destinationPort, flags="A", seq=self.seq, ack=self.ack + 1),
-            iface=self.iface,
-            verbose=0,
-        )
-        self.xml.SupportedAppProtocolRequest()
-        exi = self.xml.getEXI()
-        sendp(self.buildV2G(binascii.unhexlify(exi)), iface=self.iface, verbose=0)
+        # adjustment MicroNova
+        # sendp(
+        #     Ether(src=self.sourceMAC, dst=self.destinationMAC)
+        #     / IPv6(src=self.sourceIP, dst=self.destinationIP)
+        #     / TCP(sport=self.sourcePort, dport=self.destinationPort, flags="A", seq=self.seq, ack=self.ack + 1),
+        #     iface=self.iface,
+        #     verbose=0,
+        # )
+        if self.session_started == False: # adjustment MicroNova
+            self.session_started = True # adjustment MicroNova
+            self.xml.SupportedAppProtocolRequest()
+            exi = self.xml.getEXI()
+            self._sendp(self.buildV2G(binascii.unhexlify(exi)), iface=self.iface, verbose=0)
 
     def handlePacket(self, pkt):
         self.last_recv = pkt
-        self.seq = self.last_recv[TCP].ack
-        self.ack = self.last_recv[TCP].seq + len(self.last_recv[TCP].payload)
+        # self.seq = self.last_recv[TCP].ack # adjustment MicroNova
+        # self.ack = self.last_recv[TCP].seq + len(self.last_recv[TCP].payload) # adjustment MicroNova
 
         if self.last_recv.flags == 0x12:
             print("INFO (PEV) : Recieved SYNACK")
             self.startSession()
         if "F" in self.last_recv.flags:
-            self.fin()
+            # self.fin() # adjustment MicroNova
             return
         if "P" not in self.last_recv.flags:
             return
@@ -575,29 +613,31 @@ class _TCPHandler:
                 return
             self.msgList[payload] = exi
 
-        sendp(self.buildV2G(binascii.unhexlify(exi)), iface=self.iface, verbose=0)
+        self._sendp(self.buildV2G(binascii.unhexlify(exi)), iface=self.iface, verbose=0)
 
     def buildV2G(self, payload):
-        ethLayer = Ether()
-        ethLayer.src = self.sourceMAC
-        ethLayer.dst = self.destinationMAC
+        # adjustment MicroNova
+        # ethLayer = Ether()
+        # ethLayer.src = self.sourceMAC
+        # ethLayer.dst = self.destinationMAC
 
-        ipLayer = IPv6()
-        ipLayer.src = self.sourceIP
-        ipLayer.dst = self.destinationIP
+        # ipLayer = IPv6()
+        # ipLayer.src = self.sourceIP
+        # ipLayer.dst = self.destinationIP
 
-        tcpLayer = TCP()
-        tcpLayer.sport = self.sourcePort
-        tcpLayer.dport = self.destinationPort
-        tcpLayer.seq = self.seq
-        tcpLayer.ack = self.ack
-        tcpLayer.flags = "PA"
+        # tcpLayer = TCP()
+        # tcpLayer.sport = self.sourcePort
+        # tcpLayer.dport = self.destinationPort
+        # tcpLayer.seq = self.seq
+        # tcpLayer.ack = self.ack
+        # tcpLayer.flags = "PA"
 
         v2gLayer = V2GTP()
         v2gLayer.PayloadLen = len(payload)
         v2gLayer.Payload = payload
 
-        return ethLayer / ipLayer / tcpLayer / v2gLayer
+        # return ethLayer / ipLayer / tcpLayer / v2gLayer # adjustment MicroNova
+        return v2gLayer
 
     def getEXIFromPayload(self, data):
         data = binascii.hexlify(data)
@@ -611,7 +651,7 @@ class _TCPHandler:
                 return self.xml.getEXI()
 
             name = root[1][0].tag
-            # print(f"Response: {name}")
+            print(f"Response: {name}") # adjustment MicroNova
             if "SessionSetupRes" in name:
                 self.xml.ServiceDiscoveryRequest()
                 self.SessionID = root[0][0].text
@@ -644,12 +684,15 @@ class _TCPHandler:
                 else:
                     self.xml.PreChargeRequest()
             elif "PreChargeRes" in name:
-                currentVoltage = int(root[1][0][2][2].text)
-                if abs(currentVoltage - 400) < 10:
+                #currentVoltage = int(root[1][0][2][2].text) # adjustment MicroNova
+                #if abs(currentVoltage - 400) < 10: # adjustment MicroNova
+                if self.prechargeCount < 5: # adjustment MicroNova
                     self.xml.PowerDeliveryRequest()
+                    self.xml.ReadyToChargeState.text = "True" # adjustment MicroNova
+                    self.xml.EVRESSSOC.text = str(self.soc % 100) # adjustment MicroNova
                 else:
                     self.xml.PreChargeRequest()
-                    # self.prechargeCount = self.prechargeCount + 1
+                    self.prechargeCount = self.prechargeCount + 1 # adjustment MicroNova
             # Dont know if can get passed this point without providing actual voltage
             elif "PowerDeliveryRes" in name:
                 self.xml.CurrentDemandRequest()
@@ -671,27 +714,51 @@ class _TCPHandler:
                 return
             time.sleep(0.1)
 
-        self.destinationMAC = self.pev.destinationMAC
-        self.destinationIP = self.pev.destinationIP
-        self.destinationPort = self.pev.destinationPort
+        # adjustment MicroNova
+        # self.destinationMAC = self.pev.destinationMAC
+        # self.destinationIP = self.pev.destinationIP
+        # self.destinationPort = self.pev.destinationPort
 
-        ethLayer = Ether()
-        ethLayer.src = self.sourceMAC
-        ethLayer.dst = self.destinationMAC
+        # ethLayer = Ether()
+        # ethLayer.src = self.sourceMAC
+        # ethLayer.dst = self.destinationMAC
 
-        ipLayer = IPv6()
-        ipLayer.src = self.sourceIP
-        ipLayer.dst = self.destinationIP
+        # ipLayer = IPv6()
+        # ipLayer.src = self.sourceIP
+        # ipLayer.dst = self.destinationIP
 
-        tcpLayer = TCP()
-        tcpLayer.sport = self.sourcePort
-        tcpLayer.dport = self.destinationPort
-        tcpLayer.flags = "S"
-        tcpLayer.seq = self.seq
+        # tcpLayer = TCP()
+        # tcpLayer.sport = self.sourcePort
+        # tcpLayer.dport = self.destinationPort
+        # tcpLayer.flags = "S"
+        # tcpLayer.seq = self.seq
 
-        synPacket = ethLayer / ipLayer / tcpLayer
-        print("INFO (PEV) : Sending SYN")
-        sendp(synPacket, iface=self.iface, verbose=0)
+        # synPacket = ethLayer / ipLayer / tcpLayer
+        # print("INFO (PEV) : Sending SYN")
+        # sendp(synPacket, iface=self.iface, verbose=0)
+
+        # adjustment MicroNova
+        print("INFO (PEV): TCP Handshake start")
+        full_host_address = self.destinationIP + f"%{self.iface}"
+        resolve = socket.getaddrinfo(full_host_address, self.destinationPort, socket.AF_INET6, socket.SOCK_STREAM, 0, 0)
+        sockaddr = ()
+        (family, socktype, proto, _, sockaddr) = resolve[0]
+
+        self.conn = socket.socket(family, socktype, proto)
+        self.conn.settimeout(15)
+        try:
+            self.conn.connect(sockaddr)
+        except socket.error as e:
+            print("INFO (PEV): TCP Handshake failed")
+            raise e
+        print(self.conn.getsockname())
+        self.sourcePort = self.conn.getsockname()[1]
+        self.ssck = StreamSocket(self.conn)
+
+        print("INFO (PEV): TCP Handshake successed")
+        time.sleep(0.1)
+
+        self.startSession()
 
     def sendNeighborSolicitation(self):
         ethLayer = Ether()
