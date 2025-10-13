@@ -91,7 +91,15 @@ class PEV:
         if not self.tcp.finishedNMAP:
             print("INFO (PEV) : Attempting to restart connection...")
             self.start()
-
+        if not self.slac.slac_only:
+            elf.tcp.destinationIP = self.destinationIP  # adjustment MicroNova
+            self.tcp.destinationPort = self.destinationPort  # adjustment MicroNova
+            self.tcp.destinationMAC = self.slac.destinationMAC  # adjustment MicroNova
+            self.doTCP()
+            # If NMAP is not done, restart connection
+            if not self.tcp.finishedNMAP:
+                print("INFO (PEV) : Attempting to restart connection...")
+                self.start()
     def doTCP(self):
         self.tcp.start()
         print("INFO (PEV) : Done TCP")
@@ -133,6 +141,7 @@ class _SLACHandler:
         self.sourceMAC = self.pev.sourceMAC
         self.sourceIP = self.pev.sourceIP
         self.runID = b"\xf4\x00\x37\xd0\x00\x5c\x00\x7f"
+        self.slac_only = os.getenv("SLAC_ONLY") == "1"
 
         self.timeSinceLastPkt = time.time()
         self.timeout = 8  # How long to wait for a message to timeout
@@ -171,12 +180,16 @@ class _SLACHandler:
                 else: # adjustment MicroNova
                     self.stop = True
                     Thread(target=self.sendSECCRequest).start()
-
+                    self.stop = True
+                    if not self.slac_only:
+                        Thread(target=self.sendSECCRequest).start()
     def startSniff(self):
         sniff(iface=self.iface, prn=self.handlePacket, stop_filter=self.stopSniff)
 
     # Stop the thread when the slac match is done
     def stopSniff(self, pkt):
+        if self.slac_only:
+            return self.stop
         if pkt.haslayer("SECC_ResponseMessage"):
             self.pev.destinationIP = pkt[SECC_ResponseMessage].TargetAddress
             self.pev.destinationPort = pkt[SECC_ResponseMessage].TargetPort
@@ -226,6 +239,16 @@ class _SLACHandler:
             print("INFO (PEV) : Sending SET_KEY_REQ")
             sendp(self.buildSetKeyReq(), iface=self.iface, verbose=0)
             self.stop = True
+            Thread(target=self.sendSECCRequest).start()
+            self.stop = True
+            if self.slac_only:
+            # end after SLAC; no SECC
+                try:
+                    if self.neighborSolicitationThread.running:
+                        self.neighborSolicitationThread.stop()
+                except Exception:
+                    pass
+                return
             Thread(target=self.sendSECCRequest).start()
             return
 

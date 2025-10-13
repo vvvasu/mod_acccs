@@ -95,6 +95,16 @@ class EVSE:
         if not self.tcp.finishedNMAP:
             print("INFO (EVSE): Attempting to restart connection...")
             self.start()
+        # ONLY proceed to TCP/V2G/SECC if not SLAC-only
+        if not self.slac.slac_only:
+            self.tcp.sourcePort = self.sourcePort
+            self.tcp.destinationIP = self.slac.destinationIP
+            self.tcp.destinationPort = self.destinationPort
+            self.tcp.destinationMAC = self.slac.destinationMAC
+            self.doTCP()
+            if not self.tcp.finishedNMAP:
+                print("INFO (EVSE): Attempting to restart connection...")
+                self.start()
 
     # Close the circuit for the proximity pins
     def closeProximity(self):
@@ -141,6 +151,8 @@ class _SLACHandler:
 
         self.timeout = 8
         self.stop = False
+        # opt-in: when SLAC_ONLY=1, stop after SLAC_MATCH_CNF and skip SECC/TCP
+        self.slac_only = os.getenv("SLAC_ONLY") == "1"
 
     # Starts SLAC process
     def start(self):
@@ -174,6 +186,18 @@ class _SLACHandler:
             self.evse.destinationMAC = pkt[Ether].src # adjustment MicroNova
             self.destinationMAC = pkt[Ether].src # adjustment MicroNova
             # use this to send 3 secc responses incase car doesnt see one
+            self.destinationIP = pkt[IPv6].src
+            self.destinationPort = pkt[UDP].sport
+            Thread(target=self.sendSECCResponse).start()
+            self.stop = True
+        if self.slac_only:
+            return self.stop
+        # original behavior: stop when SECC Request arrives (used for discovery)
+        if pkt.haslayer("SECC_RequestMessage"):
+            self.handshake()  # adjustment MicroNova
+            print("INDO (EVSE): Recieved SECC_RequestMessage")
+            self.evse.destinationMAC = pkt[Ether].src
+            self.destinationMAC = pkt[Ether].src
             self.destinationIP = pkt[IPv6].src
             self.destinationPort = pkt[UDP].sport
             Thread(target=self.sendSECCResponse).start()
@@ -226,6 +250,18 @@ class _SLACHandler:
             print("INFO (EVSE): Recieved SLAC_MATCH_REQ")
             print("INFO (EVSE): Sending SLAC_MATCH_CNF")
             sendp(self.buildSlacMatchCnf(), iface=self.iface, verbose=0)
+            # if running in SLAC-only mode, finish SLAC here
+            if self.slac_only:
+                self.stop = True
+                try:
+                    # sniff() stop_filter may not be checked until next pkt; force-stop thread
+                    if getattr(self.sniffThread, "is_alive", False):
+                        # sniffThread is a Thread; AsyncSniffer uses .stop() — try both
+                        try: self.sniffThread.stop()
+                        except Exception: pass
+                except Exception:
+                    pass
+                return
 
     def buildSlacParmCnf(self):
         ethLayer = Ether()
