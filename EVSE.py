@@ -86,15 +86,15 @@ class EVSE:
 
         self.toggleProximity()
         self.doSLAC()
-        self.tcp.sourcePort = self.sourcePort # adjustment MicroNova
-        self.tcp.destinationIP = self.slac.destinationIP # adjustment MicroNova
-        self.tcp.destinationPort = self.destinationPort # adjustment MicroNova
-        self.tcp.destinationMAC = self.slac.destinationMAC # adjustment MicroNova
-        self.doTCP()
+        #self.tcp.sourcePort = self.sourcePort # adjustment MicroNova
+        #self.tcp.destinationIP = self.slac.destinationIP # adjustment MicroNova
+        #self.tcp.destinationPort = self.destinationPort # adjustment MicroNova
+        #self.tcp.destinationMAC = self.slac.destinationMAC # adjustment MicroNova
+        #self.doTCP()
         # If NMAP is not done, restart connection
-        if not self.tcp.finishedNMAP:
-            print("INFO (EVSE): Attempting to restart connection...")
-            self.start()
+        #if not self.tcp.finishedNMAP:
+            #print("INFO (EVSE): Attempting to restart connection...")
+            #self.start()
         # ONLY proceed to TCP/V2G/SECC if not SLAC-only
         if not self.slac.slac_only:
             self.tcp.sourcePort = self.sourcePort
@@ -179,9 +179,10 @@ class _SLACHandler:
         sniff(iface=self.iface, prn=self.handlePacket, stop_filter=self.stopSniff)
 
     def stopSniff(self, pkt):
+        if self.slac_only:
+            return self.stop
         if pkt.haslayer("SECC_RequestMessage"):
             self.handshake() # adjustment MicroNova
-
             print("INDO (EVSE): Recieved SECC_RequestMessage")
             self.evse.destinationMAC = pkt[Ether].src # adjustment MicroNova
             self.destinationMAC = pkt[Ether].src # adjustment MicroNova
@@ -190,18 +191,17 @@ class _SLACHandler:
             self.destinationPort = pkt[UDP].sport
             Thread(target=self.sendSECCResponse).start()
             self.stop = True
-        if self.slac_only:
-            return self.stop
+
         # original behavior: stop when SECC Request arrives (used for discovery)
-        if pkt.haslayer("SECC_RequestMessage"):
-            self.handshake()  # adjustment MicroNova
-            print("INDO (EVSE): Recieved SECC_RequestMessage")
-            self.evse.destinationMAC = pkt[Ether].src
-            self.destinationMAC = pkt[Ether].src
-            self.destinationIP = pkt[IPv6].src
-            self.destinationPort = pkt[UDP].sport
-            Thread(target=self.sendSECCResponse).start()
-            self.stop = True
+        #if pkt.haslayer("SECC_RequestMessage"):
+            #self.handshake()  # adjustment MicroNova
+            #print("INDO (EVSE): Recieved SECC_RequestMessage")
+            #self.evse.destinationMAC = pkt[Ether].src
+            #self.destinationMAC = pkt[Ether].src
+            #self.destinationIP = pkt[IPv6].src
+            #self.destinationPort = pkt[UDP].sport
+            #Thread(target=self.sendSECCResponse).start()
+            #self.stop = True
         return self.stop
 
     # adjustment MicroNova
@@ -253,14 +253,14 @@ class _SLACHandler:
             # if running in SLAC-only mode, finish SLAC here
             if self.slac_only:
                 self.stop = True
-                try:
+                #try:
                     # sniff() stop_filter may not be checked until next pkt; force-stop thread
-                    if getattr(self.sniffThread, "is_alive", False):
+                    #if getattr(self.sniffThread, "is_alive", False):
                         # sniffThread is a Thread; AsyncSniffer uses .stop() — try both
-                        try: self.sniffThread.stop()
-                        except Exception: pass
-                except Exception:
-                    pass
+                        #try: self.sniffThread.stop()
+                        #except Exception: pass
+                #except Exception:
+                    #pass
                 return
 
     def buildSlacParmCnf(self):

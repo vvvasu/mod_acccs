@@ -83,16 +83,16 @@ class PEV:
 
         self.toggleProximity()
         self.doSLAC()
-        self.tcp.destinationIP = self.destinationIP # adjustment MicroNova
-        self.tcp.destinationPort = self.destinationPort # adjustment MicroNova
-        self.tcp.destinationMAC = self.slac.destinationMAC # adjustment MicroNova
-        self.doTCP()
+        #self.tcp.destinationIP = self.destinationIP # adjustment MicroNova
+        #self.tcp.destinationPort = self.destinationPort # adjustment MicroNova
+        #self.tcp.destinationMAC = self.slac.destinationMAC # adjustment MicroNova
+        #self.doTCP()
         # If NMAP is not done, restart connection
-        if not self.tcp.finishedNMAP:
-            print("INFO (PEV) : Attempting to restart connection...")
-            self.start()
+        #if not self.tcp.finishedNMAP:
+            #print("INFO (PEV) : Attempting to restart connection...")
+            #self.start()
         if not self.slac.slac_only:
-            elf.tcp.destinationIP = self.destinationIP  # adjustment MicroNova
+            self.tcp.destinationIP = self.destinationIP  # adjustment MicroNova
             self.tcp.destinationPort = self.destinationPort  # adjustment MicroNova
             self.tcp.destinationMAC = self.slac.destinationMAC  # adjustment MicroNova
             self.doTCP()
@@ -178,8 +178,8 @@ class _SLACHandler:
                     self.timeSinceLastPkt = time.time()
                     self.timeout_count += 1
                 else: # adjustment MicroNova
-                    self.stop = True
-                    Thread(target=self.sendSECCRequest).start()
+                    #self.stop = True
+                    #Thread(target=self.sendSECCRequest).start()
                     self.stop = True
                     if not self.slac_only:
                         Thread(target=self.sendSECCRequest).start()
@@ -239,17 +239,23 @@ class _SLACHandler:
             print("INFO (PEV) : Sending SET_KEY_REQ")
             sendp(self.buildSetKeyReq(), iface=self.iface, verbose=0)
             self.stop = True
-            Thread(target=self.sendSECCRequest).start()
-            self.stop = True
-            if self.slac_only:
+            #Thread(target=self.sendSECCRequest).start()
+            #self.stop = True
+            if not self.slac_only:
             # end after SLAC; no SECC
+                #try:
+                    #if self.neighborSolicitationThread.running:
+                        #self.neighborSolicitationThread.stop()
+                #except Exception:
+                    #pass
+                #return
+                Thread(target=self.sendSECCRequest).start()
+            else:
                 try:
-                    if self.neighborSolicitationThread.running:
+                    if getattr(self.neighborSolicitationThread, "running", False):
                         self.neighborSolicitationThread.stop()
                 except Exception:
                     pass
-                return
-            Thread(target=self.sendSECCRequest).start()
             return
 
     def sendSECCRequest(self):
