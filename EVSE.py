@@ -86,15 +86,15 @@ class EVSE:
 
         self.toggleProximity()
         self.doSLAC()
-        self.tcp.sourcePort = self.sourcePort # adjustment MicroNova
-        self.tcp.destinationIP = self.slac.destinationIP # adjustment MicroNova
-        self.tcp.destinationPort = self.destinationPort # adjustment MicroNova
-        self.tcp.destinationMAC = self.slac.destinationMAC # adjustment MicroNova
-        self.doTCP()
-        # If NMAP is not done, restart connection
-        if not self.tcp.finishedNMAP:
-            print("INFO (EVSE): Attempting to restart connection...")
-            self.start()
+        if not self.slac.slac_only:  # Virtual SLAC ONLY MOD
+            self.tcp.sourcePort = self.sourcePort
+            self.tcp.destinationIP = self.slac.destinationIP
+            self.tcp.destinationPort = self.destinationPort
+            self.tcp.destinationMAC = self.slac.destinationMAC
+            self.doTCP()
+            if not self.tcp.finishedNMAP:
+                print("INFO (EVSE): Attempting to restart connection...")
+                self.start()
 
     # Close the circuit for the proximity pins
     def closeProximity(self):
@@ -141,6 +141,8 @@ class _SLACHandler:
 
         self.timeout = 8
         self.stop = False
+        # opt-in: when SLAC_ONLY=1, stop after SLAC_MATCH_CNF and skip SECC/TCP
+        self.slac_only = os.getenv("SLAC_ONLY") == "1"  # Virtual SLAC ONLY MOD
 
     # Starts SLAC process
     def start(self):
@@ -167,9 +169,10 @@ class _SLACHandler:
         sniff(iface=self.iface, prn=self.handlePacket, stop_filter=self.stopSniff)
 
     def stopSniff(self, pkt):
+        if self.slac_only:  #Virtual SLAC ONLY MOD
+            return self.stop
         if pkt.haslayer("SECC_RequestMessage"):
             self.handshake() # adjustment MicroNova
-
             print("INDO (EVSE): Recieved SECC_RequestMessage")
             self.evse.destinationMAC = pkt[Ether].src # adjustment MicroNova
             self.destinationMAC = pkt[Ether].src # adjustment MicroNova
@@ -226,6 +229,10 @@ class _SLACHandler:
             print("INFO (EVSE): Recieved SLAC_MATCH_REQ")
             print("INFO (EVSE): Sending SLAC_MATCH_CNF")
             sendp(self.buildSlacMatchCnf(), iface=self.iface, verbose=0)
+            # if running in SLAC-only mode, finish SLAC here
+            if self.slac_only:
+                self.stop = True
+                return
 
     def buildSlacParmCnf(self):
         ethLayer = Ether()
